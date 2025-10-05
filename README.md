@@ -165,21 +165,6 @@ opencv-python          # Computer vision
 requests==2.31.0       # HTTP client (for testing)
 ```
 
-### System Requirements
-
-- **OS**: Windows 10/11, Linux, macOS
-- **Python**: 3.8 or higher
-- **Memory**: 4GB RAM minimum (8GB recommended)
-- **Storage**: 500MB for dependencies
-
-## 🛠️ Configuration
-
-### Performance Settings
-
-- **Debug Mode**: Disabled for production speed
-- **Threading**: Enabled for concurrent requests
-- **Port**: 5000 (configurable in app.py)
-- **Host**: 0.0.0.0 (accepts external connections)
 
 ### Algorithm Parameters (CFG)
 
@@ -205,47 +190,6 @@ curl -X POST http://localhost:5000/detect-anomalies \
   -F "baseline=@path/to/baseline_image.jpg" \
   -F "candidate=@path/to/current_image.jpg"
 ```
-
-## 🚨 Troubleshooting
-
-### Common Issues
-
-1. **Server won't start**
-
-   - Check if port 5000 is available
-   - Ensure virtual environment is activated
-   - Verify all dependencies are installed
-
-2. **Import errors**
-
-   - Check Python path and virtual environment
-   - Install missing packages: `pip install -r requirements.txt`
-
-3. **Memory issues**
-
-   - Large thermal images may require more RAM
-   - Consider image resizing for performance
-
-4. **400 Bad Request**
-   - Ensure both baseline and candidate images are provided
-   - Check file format (JPG, PNG supported)
-   - Verify multipart/form-data content type
-
-## 📈 Performance Optimization
-
-- **Production Mode**: Debug disabled for faster processing
-- **Threaded Requests**: Multiple concurrent image analyses
-- **Temporary Files**: Automatic cleanup after processing
-- **Memory Management**: Efficient image handling with OpenCV
-
-## 🔒 Security Notes
-
-- Server accepts external connections (0.0.0.0)
-- No authentication implemented (add as needed)
-- Temporary files are cleaned up automatically
-- Consider adding rate limiting for production use
-
-**🚀 Ready to detect transformer anomalies with AI-powered thermal analysis!**
 
 ## Setup
 
