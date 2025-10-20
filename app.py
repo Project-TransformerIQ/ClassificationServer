@@ -113,9 +113,10 @@ def build_regions_from_boxes(res: dict, tag: str):
 def api_classify():
     """
     POST /api/classify
-    multipart/form-data with two files:
+    multipart/form-data with three files:
         - baseline:   baseline image file
         - candidate:  current image file
+        - config:     optional JSON config file to override defaults
     Optional query/string:
         - returnAnnotated (0/1): include path string to annotated image in payload (debug)
     """
@@ -125,6 +126,7 @@ def api_classify():
 
     f_base = request.files["baseline"]
     f_curr = request.files["candidate"]
+    f_config = request.files.get("config")  # Optional config file
 
     return_annot = str(request.args.get("returnAnnotated", "0")).strip() in ("1", "true", "True")
 
@@ -141,8 +143,23 @@ def api_classify():
         f_base.save(b_path)
         f_curr.save(c_path)
 
-        # Run your existing classifier (it writes annotated image to out_path)
-        res = classify_transformer(b_path, c_path, out_path, CFG)
+        # Handle optional config override
+        runtime_cfg = CFG.copy()  # Start with default config
+        
+        if f_config:
+            try:
+                config_data = json.load(f_config.stream)
+                print(f"[DEBUG] Received config data: {json.dumps(config_data, indent=2)}")
+        
+                runtime_cfg.update(config_data)  # Merge/override with provided config
+                print(f"[DEBUG] Runtime config after merge: {json.dumps(runtime_cfg, indent=2)}")
+            except json.JSONDecodeError as e:
+                return jsonify({"error": f"Invalid JSON in config file: {str(e)}"}), 400
+            except Exception as e:
+                return jsonify({"error": f"Error reading config: {str(e)}"}), 400
+
+        # Run your existing classifier with runtime config (it writes annotated image to out_path)
+        res = classify_transformer(b_path, c_path, out_path, runtime_cfg)
 
         # Build response
         tag = tag_for(res.get("classification", "Normal"))
