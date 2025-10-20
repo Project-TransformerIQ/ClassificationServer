@@ -61,8 +61,6 @@ CFG: Dict = {
     "white_bg_exclude_near_warm_px": 9,  # exclude whites close to heat
     "white_bg_column_frac": 0.92,        # column must be ≥92% white to trim from side
     "white_bg_row_frac":    0.92,        # row must be ≥92% white to trim from top/bottom
-    "crop_sidebar_in_output": True,      # still crop sidebars
-    "crop_white_bg_in_output": True,     # crop large white background margins
 }
 
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}

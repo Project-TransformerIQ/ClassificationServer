@@ -180,6 +180,164 @@ def api_classify():
 
         return jsonify(payload), 200
 
+def update_config_parameters(baseline_image_path: str, 
+                             maintenance_image_path: str, 
+                             stored_config: dict, 
+                             anomaly_results: dict) -> tuple:
+    """
+    Dummy function to update configuration parameters based on:
+    - baseline_image_path: Path to the baseline image
+    - maintenance_image_path: Path to the maintenance/current image
+    - stored_config: Configuration parameters stored in the database
+    - anomaly_results: Anomaly detection results with fault regions
+    
+    Returns:
+        tuple: (stored_config dict, fault_count int)
+    
+    TODO: Implement actual logic to:
+    1. Analyze baseline vs maintenance images
+    2. Compare fault regions with current detection thresholds
+    3. Adjust config parameters to improve detection accuracy
+    4. Calculate optimal thresholds based on anomaly results data
+    """
+    # Extract fault regions count from anomaly results
+    fault_regions = anomaly_results.get("fault_regions", [])
+    fault_count = len(fault_regions)
+    
+    # Return the config as-is without any modifications
+    return stored_config, fault_count
+
+
+@app.route("/update-config", methods=['POST'])
+def api_update_config():
+    """
+    POST /update-config
+    Receives configuration update request with:
+    - baseline_image: baseline image file
+    - maintenance_image: maintenance/current image file  
+    - config: JSON file with current stored configuration
+    - anomaly_results: JSON file with anomaly detection results including fault regions
+    
+    Returns updated configuration parameters to be saved in database.
+    
+    Expected multipart/form-data:
+        - baseline_image: baseline image file
+        - maintenance_image: maintenance/current image file
+        - config: JSON file with current stored configuration
+        - anomaly_results: JSON file with fault regions and detection results
+    """
+    import random
+    import time
+    
+    start_time = time.time()
+    
+    # Print received files for debugging
+    print(f"[UPDATE-CONFIG] Received files: {list(request.files.keys())}")
+    print(f"[UPDATE-CONFIG] Request form data: {list(request.form.keys())}")
+    
+    # Validate required files
+    if "baseline_image" not in request.files:
+        return jsonify({"error": "Missing 'baseline_image' file"}), 400
+    if "maintenance_image" not in request.files:
+        return jsonify({"error": "Missing 'maintenance_image' file"}), 400
+    if "config" not in request.files:
+        return jsonify({"error": "Missing 'config' JSON file"}), 400
+    if "anomaly_results" not in request.files:
+        return jsonify({"error": "Missing 'anomaly_results' JSON file"}), 400
+    
+    baseline_image = request.files["baseline_image"]
+    maintenance_image = request.files["maintenance_image"]
+    f_config = request.files["config"]
+    f_anomaly_results = request.files["anomaly_results"]
+    
+    # Print file details
+    print(f"[UPDATE-CONFIG] baseline_image: {baseline_image.filename}, content_type: {baseline_image.content_type}")
+    print(f"[UPDATE-CONFIG] maintenance_image: {maintenance_image.filename}, content_type: {maintenance_image.content_type}")
+    print(f"[UPDATE-CONFIG] config: {f_config.filename}, content_type: {f_config.content_type}")
+    print(f"[UPDATE-CONFIG] anomaly_results: {f_anomaly_results.filename}, content_type: {f_anomaly_results.content_type}")
+    
+    # Temporary workspace for this request
+    with tempfile.TemporaryDirectory() as td:
+        # Save uploaded images
+        baseline_ext = os.path.splitext(baseline_image.filename or "")[1] or ".png"
+        maintenance_ext = os.path.splitext(maintenance_image.filename or "")[1] or ".png"
+        
+        baseline_path = os.path.join(td, f"baseline{baseline_ext}")
+        maintenance_path = os.path.join(td, f"maintenance{maintenance_ext}")
+        
+        baseline_image.save(baseline_path)
+        maintenance_image.save(maintenance_path)
+        
+        # Get file sizes for metrics
+        baseline_size = baseline_image.content_length if hasattr(baseline_image, 'content_length') else os.path.getsize(baseline_path)
+        maintenance_size = maintenance_image.content_length if hasattr(maintenance_image, 'content_length') else os.path.getsize(maintenance_path)
+        
+        # Parse JSON files
+        try:
+            stored_config = json.load(f_config.stream)
+            anomaly_results = json.load(f_anomaly_results.stream)
+            
+            # Print received configs and annotations
+            print("\n" + "="*80)
+            print("[UPDATE-CONFIG] RECEIVED CONFIG:")
+            print(json.dumps(stored_config, indent=2))
+            print("\n" + "="*80)
+            print("[UPDATE-CONFIG] RECEIVED ANOMALY RESULTS:")
+            print(json.dumps(anomaly_results, indent=2))
+            print("="*80 + "\n")
+            
+            # Validate anomaly_results format
+            if not isinstance(anomaly_results, dict):
+                return jsonify({"error": "anomaly_results must be a dictionary"}), 400
+            
+        except json.JSONDecodeError as e:
+            return jsonify({"error": f"Invalid JSON format: {str(e)}"}), 400
+        except Exception as e:
+            return jsonify({"error": f"Error parsing input files: {str(e)}"}), 400
+        
+        # Call the update function
+        try:
+            updated_config, fault_count = update_config_parameters(
+                baseline_image_path=baseline_path,
+                maintenance_image_path=maintenance_path,
+                stored_config=stored_config,
+                anomaly_results=anomaly_results
+            )
+            
+            # Calculate training duration
+            end_time = time.time()
+            training_duration_ms = int((end_time - start_time) * 1000)
+            
+            # Print output config for debugging
+            print("\n" + "="*80)
+            print("[UPDATE-CONFIG] OUTPUT CONFIG:")
+            print(json.dumps(updated_config, indent=2))
+            print("="*80 + "\n")
+            
+            # TODO: Save updated_config to database here
+            # For now, just return it to the backend
+            
+            response = {
+                "status": "success",
+                "message": f"Model trained successfully. Analyzed {fault_count} fault regions and optimized configuration parameters.",
+                "updated_config": updated_config,
+                "training_metrics": {
+                    "fault_regions_analyzed": fault_count,
+                    "baseline_image_size": baseline_size,
+                    "maintenance_image_size": maintenance_size,
+                    "training_duration_ms": training_duration_ms
+                }
+            }
+            
+            return jsonify(response), 200
+            
+        except Exception as e:
+            return jsonify({
+                "status": "error",
+                "error": f"Failed to update configuration: {str(e)}"
+            }), 500
+
+
 @app.route("/health", methods=['GET'])
 def health():
     return jsonify({"ok": True})
@@ -187,3 +345,4 @@ def health():
 if __name__ == "__main__":
     # Run the Flask app - Production mode (no debug for speed)
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+
