@@ -180,32 +180,243 @@ def api_classify():
 
         return jsonify(payload), 200
 
+def calculate_iou(box1: dict, box2: dict) -> float:
+    """Calculate Intersection over Union (IoU) between two bounding boxes."""
+    x1_min = box1['x']
+    y1_min = box1['y']
+    x1_max = x1_min + box1['width']
+    y1_max = y1_min + box1['height']
+    
+    x2_min = box2['x']
+    y2_min = box2['y']
+    x2_max = x2_min + box2['width']
+    y2_max = y2_min + box2['height']
+    
+    # Calculate intersection
+    xi_min = max(x1_min, x2_min)
+    yi_min = max(y1_min, y2_min)
+    xi_max = min(x1_max, x2_max)
+    yi_max = min(y1_max, y2_max)
+    
+    if xi_max <= xi_min or yi_max <= yi_min:
+        return 0.0
+    
+    intersection = (xi_max - xi_min) * (yi_max - yi_min)
+    area1 = box1['width'] * box1['height']
+    area2 = box2['width'] * box2['height']
+    union = area1 + area2 - intersection
+    
+    return intersection / union if union > 0 else 0.0
+
+
+def match_regions(ground_truth: list, predictions: list, iou_threshold: float = 0.3) -> dict:
+    """
+    Match predicted regions to ground truth regions using IoU.
+    Returns: {
+        'true_positives': [(gt, pred), ...],
+        'false_positives': [pred, ...],
+        'false_negatives': [gt, ...]
+    }
+    """
+    matched_gt = set()
+    matched_pred = set()
+    true_positives = []
+    
+    # Find matches
+    for i, gt in enumerate(ground_truth):
+        best_iou = 0.0
+        best_pred_idx = -1
+        
+        for j, pred in enumerate(predictions):
+            if j in matched_pred:
+                continue
+            
+            gt_box = gt.get('boundingBox', {})
+            pred_box = pred.get('boundingBox', {})
+            
+            if not gt_box or not pred_box:
+                continue
+                
+            iou = calculate_iou(gt_box, pred_box)
+            
+            if iou > best_iou and iou >= iou_threshold:
+                best_iou = iou
+                best_pred_idx = j
+        
+        if best_pred_idx >= 0:
+            matched_gt.add(i)
+            matched_pred.add(best_pred_idx)
+            true_positives.append((ground_truth[i], predictions[best_pred_idx]))
+    
+    # Identify false positives and false negatives
+    false_positives = [pred for i, pred in enumerate(predictions) if i not in matched_pred]
+    false_negatives = [gt for i, gt in enumerate(ground_truth) if i not in matched_gt]
+    
+    return {
+        'true_positives': true_positives,
+        'false_positives': false_positives,
+        'false_negatives': false_negatives
+    }
+
+
 def update_config_parameters(baseline_image_path: str, 
                              maintenance_image_path: str, 
                              stored_config: dict, 
-                             anomaly_results: dict) -> tuple:
+                             anomaly_results: dict,
+                             original_anomaly_results: dict) -> tuple:
     """
-    Dummy function to update configuration parameters based on:
-    - baseline_image_path: Path to the baseline image
-    - maintenance_image_path: Path to the maintenance/current image
-    - stored_config: Configuration parameters stored in the database
-    - anomaly_results: Anomaly detection results with fault regions
+    Update configuration parameters by comparing ground truth (edited) with classifier output.
+    
+    Algorithm:
+    1. Match ground truth regions with predicted regions using IoU
+    2. Analyze false positives (over-detection) -> increase thresholds slightly
+    3. Analyze false negatives (missed detection) -> decrease thresholds slightly
+    4. Make conservative adjustments (5-15% change per iteration)
+    5. Focus on key detection parameters: fault_red_ratio, hist_distance_min, 
+       potential_yellow_ratio, min_blob_area_px, min_cluster_area_px
+    
+    Args:
+        baseline_image_path: Path to baseline image
+        maintenance_image_path: Path to maintenance image
+        stored_config: Current configuration
+        anomaly_results: Ground truth (user-edited) results
+        original_anomaly_results: Classifier's original predictions
     
     Returns:
-        tuple: (stored_config dict, fault_count int)
-    
-    TODO: Implement actual logic to:
-    1. Analyze baseline vs maintenance images
-    2. Compare fault regions with current detection thresholds
-    3. Adjust config parameters to improve detection accuracy
-    4. Calculate optimal thresholds based on anomaly results data
+        tuple: (updated_config dict, edited_fault_count int, original_fault_count int)
     """
-    # Extract fault regions count from anomaly results
-    fault_regions = anomaly_results.get("fault_regions", [])
-    fault_count = len(fault_regions)
+    import copy
     
-    # Return the config as-is without any modifications
-    return stored_config, fault_count
+    # Extract fault regions
+    ground_truth_regions = anomaly_results.get("fault_regions", [])
+    predicted_regions = original_anomaly_results.get("fault_regions", [])
+    
+    edited_fault_count = len(ground_truth_regions)
+    original_fault_count = len(predicted_regions)
+    
+    # Start with a copy of the stored config
+    updated_config = copy.deepcopy(stored_config)
+    
+    # If no differences, return unchanged config
+    if edited_fault_count == original_fault_count == 0:
+        print("[CONFIG-TUNING] No regions in either set - no tuning needed")
+        return updated_config, edited_fault_count, original_fault_count
+    
+    # Match regions to identify TP, FP, FN
+    matches = match_regions(ground_truth_regions, predicted_regions)
+    
+    tp_count = len(matches['true_positives'])
+    fp_count = len(matches['false_positives'])
+    fn_count = len(matches['false_negatives'])
+    
+    print(f"\n[CONFIG-TUNING] Analysis:")
+    print(f"  Ground Truth Regions: {edited_fault_count}")
+    print(f"  Predicted Regions: {original_fault_count}")
+    print(f"  True Positives: {tp_count}")
+    print(f"  False Positives: {fp_count} (over-detection)")
+    print(f"  False Negatives: {fn_count} (missed detection)")
+    
+    # Conservative adjustment factors
+    INCREASE_FACTOR = 1.08  # Increase by 8% to reduce false positives
+    DECREASE_FACTOR = 0.92  # Decrease by 8% to reduce false negatives
+    AREA_INCREASE = 1.10    # 10% for area thresholds
+    AREA_DECREASE = 0.90
+    
+    # Determine adjustment strategy
+    adjustments_made = []
+    
+    # Case 1: Too many false positives (over-detection)
+    # Increase thresholds to make detection more strict
+    if fp_count > 0 and fp_count > fn_count:
+        print(f"\n[CONFIG-TUNING] Strategy: Reduce false positives (over-detection)")
+        
+        # Increase color ratio thresholds (requires more red/yellow to trigger)
+        if 'fault_red_ratio' in updated_config:
+            old_val = updated_config['fault_red_ratio']
+            updated_config['fault_red_ratio'] = old_val * INCREASE_FACTOR
+            adjustments_made.append(f"fault_red_ratio: {old_val:.6f} -> {updated_config['fault_red_ratio']:.6f}")
+        
+        if 'potential_yellow_ratio' in updated_config:
+            old_val = updated_config['potential_yellow_ratio']
+            updated_config['potential_yellow_ratio'] = old_val * INCREASE_FACTOR
+            adjustments_made.append(f"potential_yellow_ratio: {old_val:.6f} -> {updated_config['potential_yellow_ratio']:.6f}")
+        
+        # Increase histogram distance threshold
+        if 'hist_distance_min' in updated_config:
+            old_val = updated_config['hist_distance_min']
+            updated_config['hist_distance_min'] = old_val * INCREASE_FACTOR
+            adjustments_made.append(f"hist_distance_min: {old_val:.6f} -> {updated_config['hist_distance_min']:.6f}")
+        
+        # Increase minimum area (filter out smaller detections)
+        if 'min_blob_area_px' in updated_config:
+            old_val = updated_config['min_blob_area_px']
+            updated_config['min_blob_area_px'] = int(old_val * AREA_INCREASE)
+            adjustments_made.append(f"min_blob_area_px: {old_val} -> {updated_config['min_blob_area_px']}")
+        
+        if 'min_cluster_area_px' in updated_config:
+            old_val = updated_config['min_cluster_area_px']
+            updated_config['min_cluster_area_px'] = int(old_val * AREA_INCREASE)
+            adjustments_made.append(f"min_cluster_area_px: {old_val} -> {updated_config['min_cluster_area_px']}")
+    
+    # Case 2: Too many false negatives (missed detections)
+    # Decrease thresholds to make detection more sensitive
+    elif fn_count > 0 and fn_count > fp_count:
+        print(f"\n[CONFIG-TUNING] Strategy: Reduce false negatives (missed detection)")
+        
+        # Decrease color ratio thresholds (requires less red/yellow to trigger)
+        if 'fault_red_ratio' in updated_config:
+            old_val = updated_config['fault_red_ratio']
+            updated_config['fault_red_ratio'] = old_val * DECREASE_FACTOR
+            adjustments_made.append(f"fault_red_ratio: {old_val:.6f} -> {updated_config['fault_red_ratio']:.6f}")
+        
+        if 'potential_yellow_ratio' in updated_config:
+            old_val = updated_config['potential_yellow_ratio']
+            updated_config['potential_yellow_ratio'] = old_val * DECREASE_FACTOR
+            adjustments_made.append(f"potential_yellow_ratio: {old_val:.6f} -> {updated_config['potential_yellow_ratio']:.6f}")
+        
+        # Decrease histogram distance threshold
+        if 'hist_distance_min' in updated_config:
+            old_val = updated_config['hist_distance_min']
+            updated_config['hist_distance_min'] = old_val * DECREASE_FACTOR
+            adjustments_made.append(f"hist_distance_min: {old_val:.6f} -> {updated_config['hist_distance_min']:.6f}")
+        
+        # Decrease minimum area (allow smaller detections)
+        if 'min_blob_area_px' in updated_config:
+            old_val = updated_config['min_blob_area_px']
+            updated_config['min_blob_area_px'] = max(10, int(old_val * AREA_DECREASE))
+            adjustments_made.append(f"min_blob_area_px: {old_val} -> {updated_config['min_blob_area_px']}")
+        
+        if 'min_cluster_area_px' in updated_config:
+            old_val = updated_config['min_cluster_area_px']
+            updated_config['min_cluster_area_px'] = max(50, int(old_val * AREA_DECREASE))
+            adjustments_made.append(f"min_cluster_area_px: {old_val} -> {updated_config['min_cluster_area_px']}")
+    
+    # Case 3: Balanced but not perfect - minor adjustments based on overall accuracy
+    elif fp_count > 0 or fn_count > 0:
+        print(f"\n[CONFIG-TUNING] Strategy: Balanced adjustment")
+        net_adjustment = (fn_count - fp_count) / max(1, edited_fault_count)
+        
+        if abs(net_adjustment) > 0.1:  # Only adjust if >10% imbalance
+            factor = DECREASE_FACTOR if net_adjustment > 0 else INCREASE_FACTOR
+            small_factor = 1 + (factor - 1) * 0.5  # Half the adjustment
+            
+            if 'fault_red_ratio' in updated_config:
+                old_val = updated_config['fault_red_ratio']
+                updated_config['fault_red_ratio'] = old_val * small_factor
+                adjustments_made.append(f"fault_red_ratio: {old_val:.6f} -> {updated_config['fault_red_ratio']:.6f}")
+    
+    else:
+        print(f"\n[CONFIG-TUNING] Perfect match - no adjustments needed")
+    
+    # Print adjustments
+    if adjustments_made:
+        print(f"\n[CONFIG-TUNING] Adjustments applied:")
+        for adj in adjustments_made:
+            print(f"  - {adj}")
+    else:
+        print(f"\n[CONFIG-TUNING] No adjustments made")
+    
+    return updated_config, edited_fault_count, original_fault_count
 
 
 @app.route("/update-config", methods=['POST'])
@@ -216,7 +427,8 @@ def api_update_config():
     - baseline_image: baseline image file
     - maintenance_image: maintenance/current image file  
     - config: JSON file with current stored configuration
-    - anomaly_results: JSON file with anomaly detection results including fault regions
+    - anomaly_results: JSON file with edited anomaly detection results (with manual changes)
+    - original_anomaly_results: JSON file with original anomaly detection results from classifier
     
     Returns updated configuration parameters to be saved in database.
     
@@ -224,7 +436,8 @@ def api_update_config():
         - baseline_image: baseline image file
         - maintenance_image: maintenance/current image file
         - config: JSON file with current stored configuration
-        - anomaly_results: JSON file with fault regions and detection results
+        - anomaly_results: JSON file with edited fault regions and detection results
+        - original_anomaly_results: JSON file with original fault regions from classifier
     """
     import random
     import time
@@ -244,17 +457,21 @@ def api_update_config():
         return jsonify({"error": "Missing 'config' JSON file"}), 400
     if "anomaly_results" not in request.files:
         return jsonify({"error": "Missing 'anomaly_results' JSON file"}), 400
+    if "original_anomaly_results" not in request.files:
+        return jsonify({"error": "Missing 'original_anomaly_results' JSON file"}), 400
     
     baseline_image = request.files["baseline_image"]
     maintenance_image = request.files["maintenance_image"]
     f_config = request.files["config"]
     f_anomaly_results = request.files["anomaly_results"]
+    f_original_anomaly_results = request.files["original_anomaly_results"]
     
     # Print file details
     print(f"[UPDATE-CONFIG] baseline_image: {baseline_image.filename}, content_type: {baseline_image.content_type}")
     print(f"[UPDATE-CONFIG] maintenance_image: {maintenance_image.filename}, content_type: {maintenance_image.content_type}")
     print(f"[UPDATE-CONFIG] config: {f_config.filename}, content_type: {f_config.content_type}")
     print(f"[UPDATE-CONFIG] anomaly_results: {f_anomaly_results.filename}, content_type: {f_anomaly_results.content_type}")
+    print(f"[UPDATE-CONFIG] original_anomaly_results: {f_original_anomaly_results.filename}, content_type: {f_original_anomaly_results.content_type}")
     
     # Temporary workspace for this request
     with tempfile.TemporaryDirectory() as td:
@@ -276,19 +493,25 @@ def api_update_config():
         try:
             stored_config = json.load(f_config.stream)
             anomaly_results = json.load(f_anomaly_results.stream)
+            original_anomaly_results = json.load(f_original_anomaly_results.stream)
             
             # Print received configs and annotations
             print("\n" + "="*80)
             print("[UPDATE-CONFIG] RECEIVED CONFIG:")
             print(json.dumps(stored_config, indent=2))
             print("\n" + "="*80)
-            print("[UPDATE-CONFIG] RECEIVED ANOMALY RESULTS:")
+            print("[UPDATE-CONFIG] RECEIVED EDITED ANOMALY RESULTS:")
             print(json.dumps(anomaly_results, indent=2))
+            print("\n" + "="*80)
+            print("[UPDATE-CONFIG] RECEIVED ORIGINAL ANOMALY RESULTS:")
+            print(json.dumps(original_anomaly_results, indent=2))
             print("="*80 + "\n")
             
             # Validate anomaly_results format
             if not isinstance(anomaly_results, dict):
                 return jsonify({"error": "anomaly_results must be a dictionary"}), 400
+            if not isinstance(original_anomaly_results, dict):
+                return jsonify({"error": "original_anomaly_results must be a dictionary"}), 400
             
         except json.JSONDecodeError as e:
             return jsonify({"error": f"Invalid JSON format: {str(e)}"}), 400
@@ -297,21 +520,28 @@ def api_update_config():
         
         # Call the update function
         try:
-            updated_config, fault_count = update_config_parameters(
+            updated_config, edited_fault_count, original_fault_count = update_config_parameters(
                 baseline_image_path=baseline_path,
                 maintenance_image_path=maintenance_path,
                 stored_config=stored_config,
-                anomaly_results=anomaly_results
+                anomaly_results=anomaly_results,
+                original_anomaly_results=original_anomaly_results
             )
             
             # Calculate training duration
             end_time = time.time()
             training_duration_ms = int((end_time - start_time) * 1000)
             
+            # Calculate user corrections
+            regions_deleted = original_fault_count - edited_fault_count
+            
             # Print output config for debugging
             print("\n" + "="*80)
             print("[UPDATE-CONFIG] OUTPUT CONFIG:")
             print(json.dumps(updated_config, indent=2))
+            print(f"[UPDATE-CONFIG] Original fault regions: {original_fault_count}")
+            print(f"[UPDATE-CONFIG] Edited fault regions: {edited_fault_count}")
+            print(f"[UPDATE-CONFIG] User corrections (deletions): {regions_deleted}")
             print("="*80 + "\n")
             
             # TODO: Save updated_config to database here
@@ -319,10 +549,12 @@ def api_update_config():
             
             response = {
                 "status": "success",
-                "message": f"Model trained successfully. Analyzed {fault_count} fault regions and optimized configuration parameters.",
+                "message": f"Model trained successfully. Analyzed {edited_fault_count} fault regions (originally {original_fault_count}) and optimized configuration parameters.",
                 "updated_config": updated_config,
                 "training_metrics": {
-                    "fault_regions_analyzed": fault_count,
+                    "fault_regions_analyzed": edited_fault_count,
+                    "original_fault_regions": original_fault_count,
+                    "user_corrections": regions_deleted,
                     "baseline_image_size": baseline_size,
                     "maintenance_image_size": maintenance_size,
                     "training_duration_ms": training_duration_ms
